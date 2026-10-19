@@ -63,5 +63,3 @@ MIT – see [LICENSE](LICENSE). Runtime dependency [MCEF Modern](https://modrint
 Based on the [mcef-fabric-example-mod](https://github.com/CinemaMod/mcef-fabric-example-mod) by CinemaMod (CC0-1.0).
 
 👍->🌟
-
-See [CHANGELOG.md](CHANGELOG.md) for release notes.

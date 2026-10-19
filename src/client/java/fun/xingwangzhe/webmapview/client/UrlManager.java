@@ -1,227 +1,203 @@
 package fun.xingwangzhe.webmapview.client;
 
-import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.text.Text;
-import net.minecraft.client.MinecraftClient;
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-
+/**
+ * Verwaltet die Map-URLs. Die Daten liegen seit 1.3.0 in config/webmapview.json
+ * (siehe {@link WebmapViewConfig}) und sind ueber ModMenu oder den Texteditor aenderbar.
+ */
 public class UrlManager {
-    private static final String URL_FILE_NAME = "urls.txt"; // 存储URL列表的文件名
-    private static final String DEFAULT_URL_FILE_NAME = "default_url.txt"; // 默认URL文件名
-    private static List<String> urlList = new ArrayList<>(); // 存储URL的列表
-    public static String defaultUrl="squaremap-demo.jpenilla.xyz"; // 默认URL
-    public static boolean webmapview=true;
+
+    /** Aktuell genutzte Map-URL. */
+    public static String defaultUrl = "squaremap-demo.jpenilla.xyz";
+
+    /** false = Mod deaktiviert. */
+    public static boolean webmapview = true;
+
+    private static List<String> urlList = new ArrayList<>();
+
     static {
-        loadUrls();
-        loadDefaultUrl();
+        applyConfig();
+    }
+
+    /** Uebernimmt die Werte aus der Konfiguration in die statischen Felder. */
+    public static void applyConfig() {
+        WebmapViewConfig config = WebmapViewConfig.get();
+        defaultUrl = config.mapUrl;
+        webmapview = config.enabled;
+        urlList = new ArrayList<>(config.urls);
     }
 
     /**
-     * 添加一个URL到列表中并保存到文件。
-     * @param url 要添加的URL字符串
+     * Fuegt eine URL hinzu (inkl. Speichern in der Konfiguration).
+     *
+     * @param url die URL
+     * @return true, wenn sie neu war
      */
-    public static void addUrl(String url) {
-        if (!urlList.contains(url)) { // 确保不重��添加相同的URL
-            urlList.add(url);
-            saveUrls(); // 保存更新后的URL列表到文件
-            sendFeedback(Text.translatable("feedback.url.added", url)); // 向玩家发送反馈
-        } else {
-            sendFeedback(Text.translatable("feedback.url.exists", url)); // 如果URL已存在，则通知玩家
+    public static boolean addUrl(String url) {
+        String cleaned = normalize(url);
+        if (cleaned.isEmpty()) {
+            return false;
         }
+        if (urlList.contains(cleaned)) {
+            sendFeedback(Component.translatable("feedback.url.exists", cleaned));
+            return false;
+        }
+        urlList.add(cleaned);
+        persist();
+        sendFeedback(Component.translatable("feedback.url.added", cleaned));
+        return true;
     }
 
     /**
-     * 设置默认URL。
-     * @param url 要设置为默认的URL字符串
+     * Setzt die aktive Map-URL. Die URL wird bei Bedarf in die Liste aufgenommen.
+     *
+     * @param url die URL
      */
     public static void setDefaultUrl(String url) {
-        if (urlList.contains(url)) { // 确保URL已经存在于列表中
-            defaultUrl = url;
-            saveDefaultUrl(); // 更新默认URL到文件
-            sendFeedback(Text.translatable("feedback.default.url.updated", url)); // 向玩家发送反馈
-        } else {
-            sendFeedback(Text.translatable("feedback.url.not_found", url)); // 如果URL不存在于列表中，则通知玩家
+        String cleaned = normalize(url);
+        if (cleaned.isEmpty()) {
+            sendFeedback(Component.translatable("feedback.url.not_found", String.valueOf(url)));
+            return;
         }
+        if (!urlList.contains(cleaned)) {
+            urlList.add(cleaned);
+        }
+        defaultUrl = cleaned;
+        persist();
+        sendFeedback(Component.translatable("feedback.default.url.updated", cleaned));
     }
 
-    /**
-     * 获取当前的URL列表。
-     * @return 包含所有URL的列表
-     */
+    /** Setzt die aktive Map-URL ohne Chat-Feedback (fuer den Config-Screen). */
+    public static void setDefaultUrlSilently(String url) {
+        String cleaned = normalize(url);
+        if (cleaned.isEmpty()) {
+            return;
+        }
+        if (!urlList.contains(cleaned)) {
+            urlList.add(cleaned);
+        }
+        defaultUrl = cleaned;
+        persist();
+    }
+
+    /** Liefert eine Kopie der gespeicherten URLs. */
     public static List<String> getUrlList() {
-        return urlList;
+        return new ArrayList<>(urlList);
     }
 
-    /**
-     * 获取默认URL。
-     * @return 默认URL字符串
-     */
+    /** Liefert die aktive Map-URL. */
     public static String getDefaultUrl() {
         return defaultUrl;
     }
 
-    /**
-     * 将当前的URL列表保存到文件���。
-     */
-    private static void saveUrls() {
-        Path configPath = getConfigDirectory().resolve(URL_FILE_NAME); // 获取配置文件路径
-        try (BufferedWriter writer = Files.newBufferedWriter(configPath)) { // 使用try-with-resources确保资源关闭
-            for (String url : urlList) {
-                writer.write(url); // 写入单个URL
-                writer.newLine(); // 换行以便每个URL占一行
-            }
-        } catch (IOException e) {
-            e.printStackTrace(); // 打印异常信息
-        }
-    }
-
-    /**
-     * 从文件加载URL列表。
-     */
-    private static void loadUrls() {
-        Path configPath = getConfigDirectory().resolve(URL_FILE_NAME); // 获取配置文件路径
-        urlList.clear(); // 清空现有列表以准备加载新数据
-        if (Files.exists(configPath)) { // 如果文件存在，则读取它
-            try (BufferedReader reader = Files.newBufferedReader(configPath)) { // 使用try-with-resources确保资源关闭
-                String line;
-                while ((line = reader.readLine()) != null) { // 循环读取每一行
-                    urlList.add(line); // 将每行作为一个URL添加到列表中
-                }
-            } catch (IOException e) {
-                e.printStackTrace(); // 打印异常信息
-            }
-        }
-    }
-
-    /**
-     * 保存默认URL到文件。
-     */
-    private static void saveDefaultUrl() {
-        Path defaultUrlPath = getConfigDirectory().resolve(DEFAULT_URL_FILE_NAME); // 获取默认URL文件路径
-        try (BufferedWriter writer = Files.newBufferedWriter(defaultUrlPath)) { // 使用try-with-resources确保资源关闭
-            if (defaultUrl != null && !defaultUrl.trim().isEmpty()) {
-                writer.write(defaultUrl); // 写入默认URL
-            } else {
-                // 如果没有有效的默认URL，则删除默认URL文件（如果存在）
-                Files.deleteIfExists(defaultUrlPath);
-            }
-        } catch (IOException e) {
-            e.printStackTrace(); // 打印异常信息
-        }
-    }
-
-    /**
-     * 从文件加载默认URL。
-     */
-    private static void loadDefaultUrl() {
-        Path defaultUrlPath = getConfigDirectory().resolve(DEFAULT_URL_FILE_NAME); // 获取默认URL文件路径
-        if (Files.exists(defaultUrlPath)) { // 如果文件存在，则读取它
-            try (BufferedReader reader = Files.newBufferedReader(defaultUrlPath)) { // 使用try-with-resources确保资源关闭
-                String line;
-                if ((line = reader.readLine()) != null) { // 只读取第一行
-                    defaultUrl = line; // 设置默认URL
-                }
-            } catch (IOException e) {
-                e.printStackTrace(); // 打印异常信息
-            }
-        }
-    }
-
-    /**
-     * 获取配置目录路径。
-     * @return Minecraft配置目录下的路径
-     */
-    private static Path getConfigDirectory() {
-        Path configDir = FabricLoader.getInstance().getConfigDir();
-        try {
-            Files.createDirectories(configDir); // 如果目录不存在，则创建之
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return configDir;
-    }
-
-    /**
-     * 发送反馈信息到聊天栏。
-     * @param message 要发送的消息
-     */
-    public static void sendFeedback(String message) {
-        if (MinecraftClient.getInstance().player != null) {
-            MinecraftClient.getInstance().player.sendMessage(Text.of(message), false);
-        }
-    }
-
-    public static void sendFeedback(Text textMessage) {
-        if (MinecraftClient.getInstance().player != null) {
-            MinecraftClient.getInstance().player.sendMessage(textMessage, false);
-        }
-    }
-
+    /** Entfernt eine URL aus der Liste. */
     public static void removeUrl(String url) {
-        if (urlList.remove(url)) { // 如果成功移除URL
-            saveUrls(); // 保存更新后的URL列表到文件
-
-            // 如果被删除的URL是默认URL，则清除默认URL设置
-            if (defaultUrl != null && defaultUrl.equals(url)) {
-                clearDefaultUrl();
+        String cleaned = normalize(url);
+        if (urlList.remove(cleaned)) {
+            if (defaultUrl != null && defaultUrl.equals(cleaned)) {
+                defaultUrl = urlList.isEmpty() ? "" : urlList.get(0);
             }
-
-            sendFeedback(Text.translatable("feedback.url.removed", url)); // 向玩家发送反馈
+            persist();
+            sendFeedback(Component.translatable("feedback.url.removed", cleaned));
         } else {
-            sendFeedback(Text.translatable("feedback.url.not_found", url)); // 如果URL不存在，则通知玩家
+            sendFeedback(Component.translatable("feedback.url.not_found", cleaned));
         }
     }
 
     /**
-     * 清除默认URL设置。
+     * Fuegt eine URL hinzu, ohne Chat-Feedback (fuer den Config-Screen).
+     *
+     * @param url die URL
+     * @return true, wenn sie neu war
      */
-    private static void clearDefaultUrl() {
-        defaultUrl = null;
-        Path defaultUrlPath = getConfigDirectory().resolve(DEFAULT_URL_FILE_NAME); // 获取默认URL文件路径
-        try {
-            Files.deleteIfExists(defaultUrlPath); // 删除默认URL文件（如果存在）
-        } catch (IOException e) {
-            e.printStackTrace(); // 打印异常信息
+    public static boolean addUrlSilently(String url) {
+        String cleaned = normalize(url);
+        if (cleaned.isEmpty() || urlList.contains(cleaned)) {
+            return false;
         }
+        urlList.add(cleaned);
+        persist();
+        return true;
     }
 
+    /** Entfernt eine URL ohne Chat-Feedback (fuer den Config-Screen). */
+    public static void removeUrlSilently(String url) {
+        String cleaned = normalize(url);
+        if (!urlList.remove(cleaned)) {
+            return;
+        }
+        if (defaultUrl != null && defaultUrl.equals(cleaned)) {
+            defaultUrl = urlList.isEmpty() ? "" : urlList.get(0);
+        }
+        persist();
+    }
+
+    /** Schaltet die Mod an/aus und speichert das in der Konfiguration. */
+    public static void setEnabledSilently(boolean enabled) {
+        webmapview = enabled;
+        persist();
+    }
+
+    /** true, wenn die Mod aktiv ist. */
+    public static boolean isEnabled() {
+        return webmapview;
+    }
+
+    /** Uebernimmt die aktuelle Liste in die Konfigurationsdatei. */
+    private static void persist() {
+        WebmapViewConfig config = WebmapViewConfig.get();
+        config.urls = new ArrayList<>(urlList);
+        config.mapUrl = defaultUrl;
+        config.enabled = webmapview;
+        WebmapViewConfig.save();
+    }
+    /** Entfernt Leerzeichen und ein evtl. mitgeschriebenes https:// . */
+    private static String normalize(String url) {
+        if (url == null) {
+            return "";
+        }
+        String cleaned = url.trim();
+        while (cleaned.endsWith("/")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        }
+        return cleaned;
+    }
+
+    /** Baut aus der Basis-URL die komplette squaremap-URL inkl. Spielerposition. */
     public static String fullUrl(String baseUrl) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null || client.world == null|| webmapview==false ) {
-            sendFeedback(Text.translatable("feedback.player_or_world_not_available")); // 使用翻译文本
-            return baseUrl; // 如果无法获取玩家或世界信息，则返回原始URL
+        Minecraft client = Minecraft.getInstance();
+        if (client.player == null || client.level == null || !webmapview) {
+            sendFeedback(Component.translatable("feedback.player_or_world_not_available"));
+            return baseUrl;
         }
 
-        // 获取玩家坐标并转换为整数
         int playerX = (int) client.player.getX();
         int playerZ = (int) client.player.getZ();
 
-        // 获取玩家所在的世界名称
-        String worldName = client.world.getRegistryKey().getValue().toString();
-        if(Objects.equals(worldName, "minecraft:overworld")){
+        String worldName = client.level.dimension().identifier().toString();
+        if (Objects.equals(worldName, "minecraft:overworld")) {
             worldName = "world";
-        } else if (Objects.equals(worldName, "minecraft:the_nether")){
+        } else if (Objects.equals(worldName, "minecraft:the_nether")) {
             worldName = "world_nether";
-        } else if (Objects.equals(worldName, "minecraft:the_end")){
+        } else if (Objects.equals(worldName, "minecraft:the_end")) {
             worldName = "world_the_end";
         }
 
-        // 构建完整的URL
         StringBuilder fullUrlBuilder = new StringBuilder();
         if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
             fullUrlBuilder.append("https://");
         }
         fullUrlBuilder.append(baseUrl).append("/");
-        if (!baseUrl.contains("?")) { // 检查是否已有参数
+        if (!baseUrl.contains("?")) {
             fullUrlBuilder.append("?");
         } else {
-            fullUrlBuilder.append("&"); // 如果已经有参数，则使用&连接
+            fullUrlBuilder.append("&");
         }
         fullUrlBuilder.append("x=").append(playerX)
                 .append("&z=").append(playerZ)
@@ -229,5 +205,19 @@ public class UrlManager {
                 .append("&world=").append(worldName);
 
         return fullUrlBuilder.toString();
+    }
+
+    /** Chat-Feedback als reiner Text. */
+    public static void sendFeedback(String message) {
+        if (Minecraft.getInstance().player != null) {
+            Minecraft.getInstance().player.sendSystemMessage(Component.literal(message));
+        }
+    }
+
+    /** Chat-Feedback als uebersetzbare Komponente. */
+    public static void sendFeedback(Component textMessage) {
+        if (Minecraft.getInstance().player != null) {
+            Minecraft.getInstance().player.sendSystemMessage(textMessage);
+        }
     }
 }

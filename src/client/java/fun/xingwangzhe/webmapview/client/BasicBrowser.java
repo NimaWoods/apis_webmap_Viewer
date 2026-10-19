@@ -1,26 +1,31 @@
 package fun.xingwangzhe.webmapview.client;
 
-import com.cinemamod.mcef.MCEF;
-import com.cinemamod.mcef.MCEFBrowser;
+import com.mojang.blaze3d.platform.cursor.CursorType;
 import com.mojang.blaze3d.systems.RenderSystem;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.render.*;
-import net.minecraft.text.Text;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import net.dimaskama.mcef.api.MCEFApi;
+import net.dimaskama.mcef.api.MCEFBrowser;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.CharacterEvent;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.network.chat.Component;
 import org.cef.CefSettings;
 import org.cef.browser.CefBrowser;
-import org.cef.handler.CefDisplayHandler;
-import org.cef.handler.CefLoadHandler;
-import org.cef.network.CefRequest;
 import org.cef.browser.CefFrame;
+import org.cef.handler.CefDisplayHandler;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static fun.xingwangzhe.webmapview.client.UrlManager.sendFeedback;
 
-//copy from https://github.com/CinemaMod/mcef-fabric-example-mod and change by xingwangzhe
+// Ursprünglich kopiert von https://github.com/CinemaMod/mcef-fabric-example-mod
+// Portiert auf Minecraft 26.3 + MCEF Modern (net.dimaskama)
 
 public class BasicBrowser extends Screen {
     private static final int BROWSER_DRAW_OFFSET = 20;
@@ -29,23 +34,31 @@ public class BasicBrowser extends Screen {
     private boolean isInitializing = false;
     private boolean initializationFailed = false;
 
-    // 添加资源包状态检测
+    // Fortschritt der MCEF-(JCEF/Chromium-)Initialisierung, nur fuer die Anzeige
+    private volatile MCEFApi.Initialization mcefInitialization;
+
+    // Statuspruefung fuer Ressourcenpakete
     private boolean resourcesReloading = false;
     private long lastResourceReloadTime = 0;
 
-    // 添加自动恢复机制
+    // Automatische Wiederherstellung
     private static int retryCount = 0;
     private static final int MAX_RETRY_COUNT = 2;
     private boolean isAutoRecovering = false;
-    
-    // 添加定期注入控制标志
+
+    // Steuerung der periodischen JavaScript-Injektion
     private volatile boolean shouldStopInjection = false;
     private volatile boolean injectionSuccessful = false;
-    
-    private final MinecraftClient minecraft = MinecraftClient.getInstance();
 
-    public BasicBrowser(Text title) {
+    public BasicBrowser(Component title) {
         super(title);
+        // Konfiguration bei jedem Oeffnen neu einlesen, damit Aenderungen in
+        // config/webmapview.json ohne Spielneustart wirksam werden.
+        try {
+            WebmapViewConfig.reload();
+        } catch (Exception e) {
+            System.err.println("[webmapview] Konfiguration konnte nicht neu geladen werden: " + e.getMessage());
+        }
     }
 
     @Override
@@ -53,63 +66,56 @@ public class BasicBrowser extends Screen {
         super.init();
 
         if (browser == null && !isInitializing) {
-            // 启动本地 HTTP 服务
-            API.startLocalHttpServer(8080, List.of()); // 初始玩家列表为空
+            // Lokalen HTTP-Server starten (Port 8080)
+            API.startLocalHttpServer(8080, List.of()); // Start mit leerer Spielerliste
 
-            // 检测资源包状态后再初始化浏览器
             if (isResourcePackReady()) {
                 initializeBrowserAsync();
             } else {
-                // 如果资源包未准备好，延迟初始化
+                // Wenn die Ressourcen noch nicht bereit sind, Initialisierung verzoegern
                 waitForResourcePackAndInitialize();
             }
         }
     }
 
     /**
-     * 检测资源包是否已完全加载
+     * Prueft, ob Ressourcenpakete vollstaendig geladen sind.
      */
     private boolean isResourcePackReady() {
         try {
-            // 检查基本资源管理器状态
             if (minecraft.getResourceManager() == null) {
                 return false;
             }
 
-            // 检查纹理管理器状态
             if (minecraft.getTextureManager() == null) {
                 return false;
             }
 
-            // 检查字体管理器状态
-            if (minecraft.textRenderer == null) {
+            if (minecraft.font == null) {
                 return false;
             }
 
-            // 检��窗口�����态
-            if (minecraft.getWindow() == null || minecraft.getWindow().getHandle() == 0) {
+            if (minecraft.getWindow() == null || minecraft.getWindow().handle() == 0) {
                 return false;
             }
 
-            // 检查最近是否发生过资源重新加载
             long currentTime = System.currentTimeMillis();
-            if (currentTime - lastResourceReloadTime < 2000) { // 增加等待时间到2秒
+            if (currentTime - lastResourceReloadTime < 2000) { // 2 Sekunden warten
                 return false;
             }
 
-            // 检查资源包是否正在重新加载
             if (resourcesReloading) {
                 return false;
             }
 
             return true;
         } catch (Exception e) {
-            System.err.println(Text.translatable("debug.resource_pack.check_failed", e.getMessage()).getString());
+            System.err.println(Component.translatable("debug.resource_pack.check_failed", e.getMessage()).getString());
             return false;
         }
     }
-    
-    // 统一的 JavaScript 注入方法
+
+    // Einheitliche JavaScript-Injektion
     private void injectJavaScriptContent() {
         if (browser != null) {
             try {
@@ -143,7 +149,7 @@ public class BasicBrowser extends Screen {
                                     players: [
                                         ...(serverData.players || []),
                                         ...(localData.players || []).filter(localPlayer => 
-                                            !(serverData.players || []).some(serverPlayer =>                                                 serverPlayer.name === localPlayer.name
+                                            !(serverData.players || []).some(serverPlayer => serverPlayer.name === localPlayer.name
                                             )
                                         )
                                     ]
@@ -174,67 +180,66 @@ public class BasicBrowser extends Screen {
                 })();
                 """;
 
-                // 启动定期注入任务直到成功
                 startPeriodicJavaScriptInjection(jsCode);
             } catch (Exception e) {
-                System.err.println("[BasicBrowser] JavaScript注入失败: " + e.getMessage());
+                System.err.println("[BasicBrowser] JavaScript-Injektion fehlgeschlagen: " + e.getMessage());
             }
         }
     }
-    
+
     /**
-     * 启动定期JavaScript注入任务
+     * Startet die periodische JavaScript-Injektion.
      */
     private void startPeriodicJavaScriptInjection(String jsCode) {
-        // 如果已有任务在运行，先停止它
+        // Laufenden Task ggf. zuerst stoppen
         shouldStopInjection = true;
         injectionSuccessful = false;
         shouldStopInjection = false;
-        
-        // 启动新的定期注入任务
+
         CompletableFuture.runAsync(() -> {
             int attempts = 0;
-            while (!shouldStopInjection && !injectionSuccessful && attempts < 30) { // 最多尝试30次
+            while (!shouldStopInjection && !injectionSuccessful && attempts < 30) { // max. 30 Versuche
                 attempts++;
                 int finalAttempts = attempts;
                 minecraft.execute(() -> {
                     if (!shouldStopInjection && browser != null) {
                         try {
-                            browser.executeJavaScript(jsCode, browser.getURL(), 0);
+                            CefBrowser cefBrowser = browser.getCefBrowser();
+                            cefBrowser.executeJavaScript(jsCode, cefBrowser.getURL(), 0);
 
-                            System.out.println("[BasicBrowser] JavaScript已注入 (尝试 #" + finalAttempts+ ")");
+                            System.out.println("[BasicBrowser] JavaScript injiziert (Versuch #" + finalAttempts + ")");
                         } catch (Exception e) {
-                            System.err.println("[BasicBrowser] JavaScript注入异常 (尝试 #" + finalAttempts + "): " + e.getMessage());
+                            System.err.println("[BasicBrowser] JavaScript-Injektion fehlerhaft (Versuch #" + finalAttempts + "): " + e.getMessage());
                         }
                     }
                 });
-                
+
                 try {
-                    Thread.sleep(1000); // 每秒尝试一次
+                    Thread.sleep(1000); // ein Versuch pro Sekunde
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
-            
+
             if (injectionSuccessful) {
-                System.out.println("[BasicBrowser] JavaScript注入成功完成");
+                System.out.println("[BasicBrowser] JavaScript-Injektion abgeschlossen");
             } else if (attempts >= 30) {
-                System.err.println("[BasicBrowser] JavaScript注入超时");
+                System.err.println("[BasicBrowser] JavaScript-Injektion Zeitueberschreitung");
             }
         });
     }
 
     /**
-     * 等待资源包完全加载后初始化浏览器
+     * Wartet, bis die Ressourcen geladen sind, und initialisiert dann den Browser.
      */
     private void waitForResourcePackAndInitialize() {
         resourcesReloading = true;
-        System.out.println(Text.translatable("debug.resource_pack.waiting").getString());
+        System.out.println(Component.translatable("debug.resource_pack.waiting").getString());
 
         CompletableFuture.runAsync(() -> {
             try {
-                int maxRetries = 30; // 最多等待15秒 (30 * 500ms)
+                int maxRetries = 30; // max. 15 Sekunden (30 * 500ms)
                 int retryCount = 0;
 
                 while (retryCount < maxRetries && !isResourcePackReady()) {
@@ -247,10 +252,9 @@ public class BasicBrowser extends Screen {
                     retryCount++;
                 }
 
-                // 额外等待确保稳定
                 if (!Thread.currentThread().isInterrupted()) {
                     try {
-                        Thread.sleep(1000); // 额外等待1秒确保完全稳定
+                        Thread.sleep(1000); // zusaetzliche Stabilisierung
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
@@ -261,10 +265,10 @@ public class BasicBrowser extends Screen {
                     lastResourceReloadTime = System.currentTimeMillis();
 
                     if (isResourcePackReady()) {
-                        System.out.println(Text.translatable("debug.resource_pack.loaded").getString());
+                        System.out.println(Component.translatable("debug.resource_pack.loaded").getString());
                         initializeBrowserAsync();
                     } else {
-                        System.err.println(Text.translatable("debug.resource_pack.timeout").getString());
+                        System.err.println(Component.translatable("debug.resource_pack.timeout").getString());
                         initializationFailed = true;
                     }
                 });
@@ -272,118 +276,119 @@ public class BasicBrowser extends Screen {
             } catch (Exception e) {
                 resourcesReloading = false;
                 initializationFailed = true;
-                System.err.println(Text.translatable("debug.resource_pack.error", e.getMessage()).getString());
+                System.err.println(Component.translatable("debug.resource_pack.error", e.getMessage()).getString());
             }
         });
     }
 
+    /**
+     * Initialisiert MCEF (JCEF/Chromium) und erstellt anschliessend den Browser.
+     */
     private void initializeBrowserAsync() {
         isInitializing = true;
         initializationFailed = false;
 
-        // 异步初始化浏览器 - 移除所有光标操作
         CompletableFuture.runAsync(() -> {
             try {
-                // 添加延迟，确保窗口完全初始化
-                Thread.sleep(100);
+                // MCEF Modern initialisieren bzw. auf laufende Initialisierung warten.
+                // Beim ersten Start wird Chromium (JCEF) heruntergeladen - das kann dauern.
+                MCEFApi.Initialization initialization = MCEFApi.initialize();
+                mcefInitialization = initialization;
+
+                MCEFApi api = initialization.getFuture().join();
+
+                if (api == null) {
+                    System.err.println(Component.translatable("debug.browser.mcef_null").getString());
+                    minecraft.execute(this::handleInitializationFailure);
+                    return;
+                }
 
                 String url = UrlManager.fullUrl(UrlManager.defaultUrl);
                 sendFeedback(url);
                 boolean transparent = false;
 
-                // 在主线程中创建浏览器 - 不操作光标
+                // Browser im Client-Thread erzeugen
                 minecraft.execute(() -> {
                     try {
-                        browser = MCEF.createBrowser(url, transparent);
+                        browser = api.createBrowser(url, transparent);
                         if (browser != null) {
                             resizeBrowser();
                             isInitializing = false;
                             retryCount = 0;
-                            System.out.println(Text.translatable("debug.browser.initialization.success").getString());
+                            System.out.println(Component.translatable("debug.browser.initialization.success").getString());
 
-                            // 注册 ConsoleMessageHandler
-                            browser.getClient().addDisplayHandler(new ConsoleMessageHandler());
-                            
-                            // 在浏览器初始化时注入 JavaScript
+                            // Konsolenausgaben der Seite in das Spiel-Log spiegeln
+                            browser.getCefBrowser().getClient().addDisplayHandler(new ConsoleMessageHandler());
+
                             injectJavaScriptContent();
-
                         } else {
-                            System.err.println(Text.translatable("debug.browser.mcef_null").getString());
+                            System.err.println(Component.translatable("debug.browser.mcef_null").getString());
                             handleInitializationFailure();
                         }
                     } catch (Exception e) {
-                        System.err.println(Text.translatable("debug.browser.init_failed_main", e.getMessage()).getString());
+                        System.err.println(Component.translatable("debug.browser.init_failed_main", e.getMessage()).getString());
                         handleInitializationFailure();
                     }
                 });
             } catch (Exception e) {
-                System.err.println(Text.translatable("debug.browser.init_failed_async", e.getMessage()).getString());
+                System.err.println(Component.translatable("debug.browser.init_failed_async", e.getMessage()).getString());
                 minecraft.execute(this::handleInitializationFailure);
             }
         });
     }
-    
+
     /**
-     * 处理初始化失败，决定是否进行自��恢复
+     * Behandelt einen Initialisierungsfehler und entscheidet ueber die automatische Wiederherstellung.
      */
     private void handleInitializationFailure() {
         isInitializing = false;
 
-        // 立即尝试自动恢复，不管是第几次失败
         if (retryCount < MAX_RETRY_COUNT && !isAutoRecovering) {
             retryCount++;
-            System.out.println(Text.translatable("debug.browser.auto_recovery_starting", retryCount, MAX_RETRY_COUNT).getString());
+            System.out.println(Component.translatable("debug.browser.auto_recovery_starting", retryCount, MAX_RETRY_COUNT).getString());
 
-            // 发送提示消息给玩家
             if (minecraft.player != null) {
-                minecraft.player.sendMessage(Text.translatable("browser.initialization.failed.auto_recovery", retryCount, MAX_RETRY_COUNT), false);
+                minecraft.player.sendSystemMessage(Component.translatable("browser.initialization.failed.auto_recovery", retryCount, MAX_RETRY_COUNT));
             }
 
-            // 立即开始自动恢复���不等待
             startAutoRecovery();
         } else {
-            // 达到最大重试次数或已经在恢复中，标记为最终失败
             initializationFailed = true;
             isAutoRecovering = false;
 
             if (retryCount >= MAX_RETRY_COUNT) {
-                System.err.println(Text.translatable("debug.browser.max_retries", MAX_RETRY_COUNT).getString());
+                System.err.println(Component.translatable("debug.browser.max_retries", MAX_RETRY_COUNT).getString());
                 if (minecraft.player != null) {
-                    minecraft.player.sendMessage(Text.translatable("browser.initialization.final_failure", MAX_RETRY_COUNT), false);
-                    minecraft.player.sendMessage(Text.translatable("browser.initialization.manual_fix_required"), false);
+                    minecraft.player.sendSystemMessage(Component.translatable("browser.initialization.final_failure", MAX_RETRY_COUNT));
+                    minecraft.player.sendSystemMessage(Component.translatable("browser.initialization.manual_fix_required"));
                 }
             } else {
-                System.err.println(Text.translatable("debug.browser.initialization.failed").getString());
+                System.err.println(Component.translatable("debug.browser.initialization.failed").getString());
                 if (minecraft.player != null) {
-                    minecraft.player.sendMessage(Text.translatable("browser.initialization.mcef_check"), false);
+                    minecraft.player.sendSystemMessage(Component.translatable("browser.initialization.mcef_check"));
                 }
             }
         }
     }
 
     /**
-     * 开始自动恢复流程：模拟按下F3+T来刷新资源包
+     * Startet die automatische Wiederherstellung: Ressourcenpakete neu laden (F3+T) und erneut versuchen.
      */
     private void startAutoRecovery() {
         isAutoRecovering = true;
 
-        System.out.println(Text.translatable("debug.browser.auto_recovery_begin").getString());
+        System.out.println(Component.translatable("debug.browser.auto_recovery_begin").getString());
 
         CompletableFuture.runAsync(() -> {
             try {
-                // 等待一小段时间确保状态稳定
                 Thread.sleep(500);
 
                 minecraft.execute(() -> {
                     try {
-                        // 模拟按下F3+T组合键来重新加载资源包
                         triggerResourcePackReload();
-
-                        // 等待资源包重新加载完成后重试初始化
                         waitForRecoveryAndRetry();
-
                     } catch (Exception e) {
-                        System.err.println(Text.translatable("debug.browser.auto_recovery_failed", e.getMessage()).getString());
+                        System.err.println(Component.translatable("debug.browser.auto_recovery_failed", e.getMessage()).getString());
                         isAutoRecovering = false;
                         initializationFailed = true;
                     }
@@ -398,41 +403,38 @@ public class BasicBrowser extends Screen {
     }
 
     /**
-     * 触发资源包重新加载 (模拟F3+T)
+     * Laedt die Ressourcenpakete neu (entspricht F3+T).
      */
     private void triggerResourcePackReload() {
         try {
-            System.out.println(Text.translatable("debug.browser.resource_reload_trigger").getString());
+            System.out.println(Component.translatable("debug.browser.resource_reload_trigger").getString());
 
-            // 设置资源包重新加载状态
             resourcesReloading = true;
             lastResourceReloadTime = System.currentTimeMillis();
 
-            // 调用Minecraft的资源包重新加载方法
-            if (minecraft.getResourcePackManager() != null) {
-                minecraft.reloadResources();
-                System.out.println(Text.translatable("debug.browser.resource_reload_success").getString());
+            if (minecraft.getResourcePackRepository() != null) {
+                minecraft.reloadResourcePacks();
+                System.out.println(Component.translatable("debug.browser.resource_reload_success").getString());
             } else {
-                System.err.println(Text.translatable("debug.browser.resource_manager_unavailable").getString());
-                throw new RuntimeException("资源包管理器不可用");
+                System.err.println(Component.translatable("debug.browser.resource_manager_unavailable").getString());
+                throw new RuntimeException("Ressourcenpaket-Manager nicht verfuegbar");
             }
 
         } catch (Exception e) {
-            System.err.println(Text.translatable("debug.browser.resource_reload_failed", e.getMessage()).getString());
+            System.err.println(Component.translatable("debug.browser.resource_reload_failed", e.getMessage()).getString());
             throw e;
         }
     }
 
     /**
-     * 等待恢复完成后重新尝试初始化���览器
+     * Wartet auf die Wiederherstellung und versucht die Initialisierung erneut.
      */
     private void waitForRecoveryAndRetry() {
         CompletableFuture.runAsync(() -> {
             try {
-                System.out.println(Text.translatable("debug.browser.waiting_recovery").getString());
+                System.out.println(Component.translatable("debug.browser.waiting_recovery").getString());
 
-                // 等待资源包重新加载完成
-                int maxWaitTime = 60; // 最多等待30秒 (60 * 500ms)
+                int maxWaitTime = 60; // max. 30 Sekunden (60 * 500ms)
                 int waitCount = 0;
 
                 while (waitCount < maxWaitTime && (resourcesReloading || !isResourcePackReady())) {
@@ -445,7 +447,6 @@ public class BasicBrowser extends Screen {
                     }
                 }
 
-                // 额外等待确保稳定
                 if (!Thread.currentThread().isInterrupted()) {
                     Thread.sleep(1000);
                 }
@@ -456,29 +457,26 @@ public class BasicBrowser extends Screen {
                     lastResourceReloadTime = System.currentTimeMillis();
 
                     if (isResourcePackReady()) {
-                        System.out.println(Text.translatable("debug.browser.recovery_completed").getString());
+                        System.out.println(Component.translatable("debug.browser.recovery_completed").getString());
                         if (minecraft.player != null) {
-                            minecraft.player.sendMessage(Text.translatable("browser.auto_recovery.completed"), false);
+                            minecraft.player.sendSystemMessage(Component.translatable("browser.auto_recovery.completed"));
                         }
 
-                        // 清理之前失败的状态
                         initializationFailed = false;
-
-                        // 重新尝试初始化
                         initializeBrowserAsync();
 
                     } else {
-                        System.err.println(Text.translatable("debug.browser.recovery_still_failed").getString());
+                        System.err.println(Component.translatable("debug.browser.recovery_still_failed").getString());
                         initializationFailed = true;
 
                         if (minecraft.player != null) {
-                            minecraft.player.sendMessage(Text.translatable("browser.auto_recovery.failed"), false);
+                            minecraft.player.sendSystemMessage(Component.translatable("browser.auto_recovery.failed"));
                         }
                     }
                 });
 
             } catch (Exception e) {
-                System.err.println(Text.translatable("debug.browser.recovery_error", e.getMessage()).getString());
+                System.err.println(Component.translatable("debug.browser.recovery_error", e.getMessage()).getString());
                 minecraft.execute(() -> {
                     isAutoRecovering = false;
                     initializationFailed = true;
@@ -487,20 +485,24 @@ public class BasicBrowser extends Screen {
         });
     }
 
+    private double guiScale() {
+        return Math.max(1, minecraft.getWindow().getGuiScale());
+    }
+
     private int mouseX(double x) {
-        return (int) ((x - BROWSER_DRAW_OFFSET) * minecraft.getWindow().getScaleFactor());
+        return (int) ((x - BROWSER_DRAW_OFFSET) * guiScale());
     }
 
     private int mouseY(double y) {
-        return (int) ((y - BROWSER_DRAW_OFFSET) * minecraft.getWindow().getScaleFactor());
+        return (int) ((y - BROWSER_DRAW_OFFSET) * guiScale());
     }
 
     private int scaleX(double x) {
-        return (int) ((x - BROWSER_DRAW_OFFSET * 2) * minecraft.getWindow().getScaleFactor());
+        return (int) ((x - BROWSER_DRAW_OFFSET * 2) * guiScale());
     }
 
     private int scaleY(double y) {
-        return (int) ((y - BROWSER_DRAW_OFFSET * 2) * minecraft.getWindow().getScaleFactor());
+        return (int) ((y - BROWSER_DRAW_OFFSET * 2) * guiScale());
     }
 
     private void resizeBrowser() {
@@ -510,294 +512,279 @@ public class BasicBrowser extends Screen {
     }
 
     @Override
-    public void resize(MinecraftClient minecraft, int i, int j) {
-        super.resize(minecraft, i, j);
+    public void resize(int width, int height) {
+        super.resize(width, height);
         if (browser != null) {
             resizeBrowser();
         }
     }
 
     @Override
-    public void close() {
-        // 停止本地 HTTP 服务
-        API.stopLocalHttpServer();
+    public void onClose() {
+        super.onClose();
+    }
 
-        // 完全移除光标恢复操作
-        // restoreCursorState();
+    @Override
+    public void removed() {
+        cleanupBrowser();
+        super.removed();
+    }
+
+    /**
+     * Gibt Browser und lokalen HTTP-Server frei.
+     */
+    private void cleanupBrowser() {
+        shouldStopInjection = true;
+
+        API.stopLocalHttpServer();
 
         if (browser != null) {
             try {
                 browser.close();
             } catch (Exception e) {
-                System.err.println(Text.translatable("debug.browser.close_failed", e.getMessage()).getString());
+                System.err.println(Component.translatable("debug.browser.close_failed", e.getMessage()).getString());
             }
+            browser = null;
         }
-        super.close();
     }
 
     @Override
-    public void render(DrawContext guiGraphics, int i, int j, float f) {
-        super.render(guiGraphics, i, j, f);
+    public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        super.extractRenderState(graphics, mouseX, mouseY, partialTick);
 
-        // 如果正在自动恢复，显示恢复状态
+        int x0 = BROWSER_DRAW_OFFSET;
+        int y0 = BROWSER_DRAW_OFFSET;
+        int x1 = width - BROWSER_DRAW_OFFSET;
+        int y1 = height - BROWSER_DRAW_OFFSET;
+
+        // Automatische Wiederherstellung laeuft
         if (isAutoRecovering) {
-            guiGraphics.fill(BROWSER_DRAW_OFFSET, BROWSER_DRAW_OFFSET,
-                    width - BROWSER_DRAW_OFFSET, height - BROWSER_DRAW_OFFSET,
-                    0xFF004400);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.auto_recovery.starting").getString(),
+            graphics.fill(x0, y0, x1, y1, 0xFF004400);
+            graphics.centeredText(font, Component.translatable("browser.auto_recovery.starting").getString(),
                     width / 2, height / 2 - 30, 0xFFFFFF);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.auto_recovery.reloading_resources").getString(),
+            graphics.centeredText(font, Component.translatable("browser.auto_recovery.reloading_resources").getString(),
                     width / 2, height / 2 - 10, 0xFFFFFF);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.auto_recovery.attempt", retryCount, MAX_RETRY_COUNT).getString(),
-                    width / 2, height / 2 + 10, 0xFFAAAA);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.auto_recovery.please_wait").getString(),
-                    width / 2, height / 2 + 30, 0xFFAAAA);
+            graphics.centeredText(font, Component.translatable("browser.auto_recovery.attempt", retryCount, MAX_RETRY_COUNT).getString(),
+                    width / 2, height / 2 + 10, 0xFFAAAAAA);
+            graphics.centeredText(font, Component.translatable("browser.auto_recovery.please_wait").getString(),
+                    width / 2, height / 2 + 30, 0xFFAAAAAA);
             return;
         }
 
-        // 如果资源包正在重新加载，显示���待信息
+        // Ressourcen werden neu geladen
         if (resourcesReloading) {
-            guiGraphics.fill(BROWSER_DRAW_OFFSET, BROWSER_DRAW_OFFSET,
-                    width - BROWSER_DRAW_OFFSET, height - BROWSER_DRAW_OFFSET,
-                    0xFF444444);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.waiting_resource_pack").getString(),
+            graphics.fill(x0, y0, x1, y1, 0xFF444444);
+            graphics.centeredText(font, Component.translatable("browser.waiting_resource_pack").getString(),
                     width / 2, height / 2 - 10, 0xFFFFFF);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.waiting_resource_pack.then_init").getString(),
-                    width / 2, height / 2 + 10, 0xFFAAAA);
+            graphics.centeredText(font, Component.translatable("browser.waiting_resource_pack.then_init").getString(),
+                    width / 2, height / 2 + 10, 0xFFAAAAAA);
             return;
         }
 
-        // 如果正在初始化，显示加载信息
+        // Browser wird initialisiert
         if (isInitializing) {
-            guiGraphics.fill(BROWSER_DRAW_OFFSET, BROWSER_DRAW_OFFSET,
-                           width - BROWSER_DRAW_OFFSET, height - BROWSER_DRAW_OFFSET,
-                           0xFF333333);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.initializing").getString(),
-                                                 width / 2, height / 2, 0xFFFFFF);
+            graphics.fill(x0, y0, x1, y1, 0xFF333333);
+            graphics.centeredText(font, Component.translatable("browser.initializing").getString(),
+                    width / 2, height / 2 - 10, 0xFFFFFF);
+
+            MCEFApi.Initialization initialization = mcefInitialization;
+            if (initialization != null && !initialization.isDone()) {
+                Component stage = describeStage(initialization.getStage());
+                // getPercentage() liefert bereits 0..100 (-1 = unbekannt) -> nicht mit 100 multiplizieren
+                float rawPercentage = initialization.getPercentage();
+                String progress = rawPercentage < 0.0f ? "" : " " + Math.round(rawPercentage) + "%";
+                graphics.centeredText(font, stage.getString() + progress,
+                        width / 2, height / 2 + 10, 0xFFAAAAAA);
+
+                // Hinweis, dass es ein einmaliger Download ist (nur beim Herunterladen/Entpacken)
+                MCEFApi.Initialization.Stage current = initialization.getStage();
+                if (current == MCEFApi.Initialization.Stage.DOWNLOADING
+                        || current == MCEFApi.Initialization.Stage.EXTRACTING) {
+                    graphics.centeredText(font, Component.translatable("browser.mcef.stage.hint").getString(),
+                            width / 2, height / 2 + 26, 0xFF777777);
+                }
+            }
             return;
         }
 
-        // 如果初始化失败，显示错误信息
+        // Initialisierung endgueltig fehlgeschlagen
         if (initializationFailed) {
-            guiGraphics.fill(BROWSER_DRAW_OFFSET, BROWSER_DRAW_OFFSET,
-                           width - BROWSER_DRAW_OFFSET, height - BROWSER_DRAW_OFFSET,
-                           0xFF333333);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.failed.title").getString(),
-                                                 width / 2, height / 2 - 20, 0xFF0000);
+            graphics.fill(x0, y0, x1, y1, 0xFF333333);
+            graphics.centeredText(font, Component.translatable("browser.failed.title").getString(),
+                    width / 2, height / 2 - 20, 0xFF0000);
             if (retryCount >= MAX_RETRY_COUNT) {
-                guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                        Text.translatable("browser.failed.tried_times", MAX_RETRY_COUNT).getString(),
-                                                     width / 2, height / 2, 0xFFFF00);
-                guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                        Text.translatable("browser.failed.manual_f3t").getString(),
-                                                     width / 2, height / 2 + 20, 0xFFFFFF);
+                graphics.centeredText(font, Component.translatable("browser.failed.tried_times", MAX_RETRY_COUNT).getString(),
+                        width / 2, height / 2, 0xFFFF00);
+                graphics.centeredText(font, Component.translatable("browser.failed.manual_f3t").getString(),
+                        width / 2, height / 2 + 20, 0xFFFFFF);
             } else {
-                guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                        Text.translatable("browser.failed.check_config").getString(),
-                                                     width / 2, height / 2 + 10, 0xFFFF00);
+                graphics.centeredText(font, Component.translatable("browser.failed.check_config").getString(),
+                        width / 2, height / 2 + 10, 0xFFFF00);
             }
             return;
         }
 
-        // 确保浏览器已初始化
-        if (browser == null || browser.getRenderer() == null) {
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.not_initialized").getString(),
-                                                 width / 2, height / 2, 0xFF0000);
+        if (browser == null) {
+            graphics.centeredText(font, Component.translatable("browser.not_initialized").getString(),
+                    width / 2, height / 2, 0xFF0000);
             return;
         }
 
-        // 获取纹理ID
-        int textureId = browser.getRenderer().getTextureID();
-        if (textureId <= 0) {
-            // 显示加载提示和调试信息
-            guiGraphics.fill(BROWSER_DRAW_OFFSET, BROWSER_DRAW_OFFSET,
-                           width - BROWSER_DRAW_OFFSET, height - BROWSER_DRAW_OFFSET,
-                           0xFF333333);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.loading").getString(),
-                                                 width / 2, height / 2 - 10, 0xFFFFFF);
-            guiGraphics.drawCenteredTextWithShadow(textRenderer,
-                    Text.translatable("browser.texture_id", textureId).getString(),
-                                                 width / 2, height / 2 + 10, 0xFFFF00);
+        // Direktes Blitten der von MCEF Modern bereitgestellten GPU-Textur
+        GpuTextureView textureView = browser.getTextureView();
+        if (textureView == null) {
+            graphics.fill(x0, y0, x1, y1, 0xFF333333);
+            graphics.centeredText(font, Component.translatable("browser.loading").getString(),
+                    width / 2, height / 2, 0xFFFFFF);
             return;
         }
 
-        // 显示调试信息
-        guiGraphics.drawTextWithShadow(textRenderer,
-                Text.translatable("browser.texture_id", textureId).getString(), 10, 10, 0xFFFFFF);
+        GpuSampler sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
+        graphics.enableScissor(x0, y0, x1, y1);
+        graphics.blit(textureView, sampler, x0, y0, x1, y1, 0.0f, 1.0f, 0.0f, 1.0f);
+        graphics.disableScissor();
 
-        // 使用原始MCEF示例的渲染方式
-        RenderSystem.setShaderTexture(0, textureId);
-        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-
-        Tessellator tessellator = Tessellator.getInstance();
-        BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_TEXTURE_COLOR);
-
-        var matrix = guiGraphics.getMatrices().peek().getPositionMatrix();
-
-        float x1 = BROWSER_DRAW_OFFSET;
-        float y1 = BROWSER_DRAW_OFFSET;
-        float x2 = width - BROWSER_DRAW_OFFSET;
-        float y2 = height - BROWSER_DRAW_OFFSET;
-
-        // 使用原始MCEF示例的纹理坐标和颜色
-        buffer.vertex(matrix, x1, y2, 0).texture(0.0f, 1.0f).color(255, 255, 255, 255);
-        buffer.vertex(matrix, x2, y2, 0).texture(1.0f, 1.0f).color(255, 255, 255, 255);
-        buffer.vertex(matrix, x2, y1, 0).texture(1.0f, 0.0f).color(255, 255, 255, 255);
-        buffer.vertex(matrix, x1, y1, 0).texture(0.0f, 0.0f).color(255, 255, 255, 255);
-
-        BufferRenderer.drawWithGlobalProgram(buffer.end());
+        // Mauszeiger der Webseite uebernehmen (Link-Zeiger, Text-Cursor, ...)
+        CursorType cursor = browser.getCursorType();
+        if (cursor != null) {
+            graphics.requestCursor(cursor);
+        }
     }
 
     /**
-     * 向页面注入玩家数据
+     * Skaliert ein Maus-Event in den Pixelraum des Browsers.
      */
-    public void injectPlayerData(String playerDataJson) {
-        // 删除所有JavaScript注入相关代码
-    }
-
-    /**
-     * 拦截并注入本地生成的玩家数据到指定的 URL。
-     */
-    private void interceptAndInjectPlayerData() {
-        // 删除所有JavaScript注入相关代码
-    }
-
-    /**
-     * 生成用于注入的玩家数据的 JSON 脚本。
-     * @return JavaScript 格式的 JSON 数据
-     */
-    private String generatePlayerJsonScript() {
-        // 删除所有JavaScript注入相关代码
-        return "";
-    }
-
-    /**
-     * 调用 PlayerInformation 的本地 JSON 生成方法，并注入到浏览器。
-     */
-
-    /**
-     * 添加 JavaScript 到 Java 的日志桥接
-     */
-    private void addJavaScriptToJavaLogging() {
-        // 删除所有JavaScript注入相关代码
+    private MouseButtonEvent toBrowserEvent(MouseButtonEvent event) {
+        return new MouseButtonEvent(mouseX(event.x()), mouseY(event.y()), event.buttonInfo());
     }
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (browser == null || browser.getRenderer() == null) {
-            return super.mouseClicked(mouseX, mouseY, button);
-        }
-        try {
-            browser.sendMousePress(mouseX(mouseX), mouseY(mouseY), button);
-            browser.setFocus(true);
-        } catch (Exception e) {
-            // 忽略浏览器交互错误，避免崩���
-        }
-        return super.mouseClicked(mouseX, mouseY, button);
-    }
-
-    @Override
-    public boolean mouseReleased(double mouseX, double mouseY, int button) {
-        if (browser == null || browser.getRenderer() == null) {
-            return super.mouseReleased(mouseX, mouseY, button);
-        }
-        try {
-            browser.sendMouseRelease(mouseX(mouseX), mouseY(mouseY), button);
-            browser.setFocus(true);
-        } catch (Exception e) {
-            // 忽略浏览器交互错误，避免崩溃
-        }
-        return super.mouseReleased(mouseX, mouseY, button);
-    }
-
-    @Override
-    public void mouseMoved(double mouseX, double mouseY) {
-        if (browser != null && browser.getRenderer() != null) {
+    public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (browser != null) {
             try {
-                browser.sendMouseMove(mouseX(mouseX), mouseY(mouseY));
+                browser.onMouseClicked(toBrowserEvent(event), doubleClick);
+                browser.setFocus(true);
             } catch (Exception e) {
-                // 忽略浏览器交互错误，避免崩溃
+                // Browser-Interaktionsfehler ignorieren, damit das Spiel nicht abstuerzt
             }
         }
-        super.mouseMoved(mouseX, mouseY);
+        return super.mouseClicked(event, doubleClick);
     }
 
     @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
-        if (browser != null && browser.getRenderer() != null) {
+    public boolean mouseReleased(MouseButtonEvent event) {
+        if (browser != null) {
             try {
-                browser.sendMouseMove(mouseX(mouseX), mouseY(mouseY));
+                browser.onMouseReleased(toBrowserEvent(event));
+                browser.setFocus(true);
             } catch (Exception e) {
-                // 忽略浏览器交互错误，避免崩溃
+                // ignorieren
             }
         }
-        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+        return super.mouseReleased(event);
     }
 
-
     @Override
-    public boolean mouseScrolled(double mouseX, double Y, double horizontalAmount, double verticalAmount) {
-        if (browser != null && browser.getRenderer() != null) {
+    public void mouseMoved(double x, double y) {
+        if (browser != null) {
             try {
-                browser.sendMouseWheel(mouseX(mouseX), mouseY(Y), verticalAmount, 0);
+                browser.onMouseMoved(mouseX(x), mouseY(y));
             } catch (Exception e) {
-                // 忽略浏览器交互错误，避免崩溃
+                // ignorieren
             }
         }
-        return super.mouseScrolled(mouseX, Y, horizontalAmount, verticalAmount);
+        super.mouseMoved(x, y);
     }
 
     @Override
-    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        // ��理ESC键关闭浏览器
-        if (keyCode == 256) { // GLFW.GLFW_KEY_ESCAPE = 256
-            this.close();
+    public boolean mouseDragged(MouseButtonEvent event, double dragX, double dragY) {
+        if (browser != null) {
+            try {
+                browser.onMouseMoved(mouseX(event.x()), mouseY(event.y()));
+            } catch (Exception e) {
+                // ignorieren
+            }
+        }
+        return super.mouseDragged(event, dragX, dragY);
+    }
+
+    @Override
+    public boolean mouseScrolled(double x, double y, double horizontalAmount, double verticalAmount) {
+        if (browser != null) {
+            try {
+                browser.onMouseScrolled(mouseX(x), mouseY(y), verticalAmount);
+            } catch (Exception e) {
+                // ignorieren
+            }
+        }
+        return super.mouseScrolled(x, y, horizontalAmount, verticalAmount);
+    }
+
+    @Override
+    public boolean keyPressed(KeyEvent event) {
+        // ESC schliesst den Browser
+        if (event.isEscape()) {
+            this.onClose();
             return true;
         }
 
-        // 动态检测切换按键关闭浏览器（支持玩家自定义按键绑定）
-        if (WebmapviewClient.isToggleKey(keyCode)) {
-            System.out.println("[DEBUG] Toggle key detected in BasicBrowser, closing...");
-            this.close();
+        // Der konfigurierte Toggle-Key schliesst den Browser ebenfalls
+        if (WebmapviewClient.isToggleKey(event)) {
+            System.out.println("[DEBUG] Toggle-Key im BasicBrowser erkannt, schliessen...");
+            this.onClose();
             return true;
         }
 
-        // 其他所有按键都不处理，直接让游戏系统处理
-        return super.keyPressed(keyCode, scanCode, modifiers);
+        // Alle anderen Tasten gehen an die Webseite (Texteingabe in Formularen!)
+        if (browser != null) {
+            try {
+                browser.onKeyPressed(event);
+            } catch (Exception e) {
+                // ignorieren
+            }
+            return true;
+        }
+
+        return super.keyPressed(event);
     }
 
     @Override
-    public boolean keyReleased(int keyCode, int scanCode, int modifiers) {
-        // 不处理任何按键释放事件，让游戏系统处理
-        return super.keyReleased(keyCode, scanCode, modifiers);
+    public boolean keyReleased(KeyEvent event) {
+        if (browser != null) {
+            try {
+                browser.onKeyReleased(event);
+            } catch (Exception e) {
+                // ignorieren
+            }
+            return true;
+        }
+        return super.keyReleased(event);
     }
 
     @Override
-    public boolean charTyped(char codePoint, int modifiers) {
-        // 不处理任何字符输入，让游戏系统处理
-        return super.charTyped(codePoint, modifiers);
+    public boolean charTyped(CharacterEvent event) {
+        if (browser != null) {
+            try {
+                browser.onCharTyped(event);
+            } catch (Exception e) {
+                // ignorieren
+            }
+            return true;
+        }
+        return super.charTyped(event);
     }
 
-    private void addLoadHandlerForJavaScriptInjection() {
-        // 删除所有JavaScript注入相关代码
+    @Override
+    public boolean isPauseScreen() {
+        return false;
     }
 
-    // 在 BasicBrowser 类中添加一个内部类实现 CefDisplayHandler
+    // Spiegelt die JavaScript-Konsole in das Spiel-Log
     private static class ConsoleMessageHandler implements CefDisplayHandler {
         @Override
         public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level, String message, String source, int line) {
             System.out.printf("[Browser Console] Level: %s, Message: %s, Source: %s, Line: %d%n", level, message, source, line);
-            return false; // 返回 false 表示消息仍会显示在浏览器控制台中
+            return false;
         }
 
         @Override
@@ -807,12 +794,31 @@ public class BasicBrowser extends Screen {
         public void onTitleChange(CefBrowser browser, String title) {}
 
         @Override
+        public void onFullscreenModeChange(CefBrowser browser, boolean fullscreen) {}
+
+        @Override
         public boolean onTooltip(CefBrowser browser, String text) { return false; }
 
         @Override
         public void onStatusMessage(CefBrowser browser, String value) {}
-
         @Override
         public boolean onCursorChange(CefBrowser browser, int cursorType) { return false; }
+    }
+
+    /**
+     * Uebersetzt die MCEF-Initialisierungsphase in einen lesbaren Text,
+     * damit man sieht, was gerade passiert (Engine-Download, Entpacken, Start).
+     */
+    private static Component describeStage(MCEFApi.Initialization.Stage stage) {
+        if (stage == null) {
+            return Component.translatable("browser.mcef.stage.not_started");
+        }
+        return switch (stage) {
+            case DOWNLOADING -> Component.translatable("browser.mcef.stage.downloading");
+            case EXTRACTING -> Component.translatable("browser.mcef.stage.extracting");
+            case INSTALL -> Component.translatable("browser.mcef.stage.install");
+            case INITIALIZING -> Component.translatable("browser.mcef.stage.initializing");
+            default -> Component.translatable("browser.mcef.stage.not_started");
+        };
     }
 }

@@ -1,50 +1,51 @@
 package fun.xingwangzhe.webmapview.client;
 
-import com.mojang.brigadier.arguments.StringArgumentType;
-import com.mojang.brigadier.context.CommandContext;
-import com.mojang.brigadier.suggestion.Suggestions;
-import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import net.dimaskama.mcef.api.MCEFApi;
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.text.Text;
-import org.lwjgl.glfw.GLFW;
-
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-
-import static fun.xingwangzhe.webmapview.client.UrlManager.sendFeedback;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import com.mojang.blaze3d.platform.InputConstants;
 
 public class WebmapviewClient implements ClientModInitializer {
-    private static CompletableFuture<Suggestions> suggestUrls(CommandContext<?> context, SuggestionsBuilder builder) {
-        List<String> urls = UrlManager.getUrlList();
-        urls.forEach(builder::suggest);
-        return builder.buildFuture();
-    }
 
-    private KeyBinding keyBinding;
+    /**
+     * Eigene Keybind-Kategorie (1.21.9+ / 26.3: {@link KeyMapping.Category} statt String).
+     */
+    private static final KeyMapping.Category CATEGORY =
+            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("webmapview", "main"));
+
+    private KeyMapping keyMapping;
     private static WebmapviewClient instance;
     private static long lastResourcePackCheckTime = 0;
 
-    public static KeyBinding getToggleKeyBinding() {
-        return instance != null ? instance.keyBinding : null;
+    // Engine-Vorladen beim Spielstart (Download/Entpacken von Chromium)
+    private static boolean enginePreloadStarted = false;
+    private static MCEFApi.Initialization engineInitialization;
+    private static MCEFApi.Initialization.Stage lastLoggedStage = null;
+    private static int lastLoggedPercent = -1;
+    private static long lastEngineLogTime = 0;
+    public static KeyMapping getToggleKeyMapping() {
+        return instance != null ? instance.keyMapping : null;
     }
 
-    public static boolean isToggleKey(int keyCode) {
-        KeyBinding binding = getToggleKeyBinding();
-        if (binding != null) {
-            return binding.matchesKey(keyCode, 0);
+    public static boolean isToggleKey(KeyEvent event) {
+        KeyMapping mapping = getToggleKeyMapping();
+        if (mapping != null) {
+            return mapping.matches(event);
         }
         return false;
     }
 
-    private static boolean isResourcePackFullyLoaded() {
+    public static boolean isResourcePackFullyLoaded() {
         try {
-            MinecraftClient minecraft = MinecraftClient.getInstance();
+            Minecraft minecraft = Minecraft.getInstance();
 
             if (minecraft.getResourceManager() == null) {
                 return false;
@@ -54,11 +55,11 @@ public class WebmapviewClient implements ClientModInitializer {
                 return false;
             }
 
-            if (minecraft.textRenderer == null) {
+            if (minecraft.font == null) {
                 return false;
             }
 
-            if (minecraft.getWindow() == null || minecraft.getWindow().getHandle() == 0) {
+            if (minecraft.getWindow() == null || minecraft.getWindow().handle() == 0) {
                 return false;
             }
 
@@ -71,7 +72,7 @@ public class WebmapviewClient implements ClientModInitializer {
             return true;
 
         } catch (Exception e) {
-            System.err.println(Text.translatable("debug.resource_pack.check_failed", e.getMessage()).getString());
+            System.err.println(Component.translatable("debug.resource_pack.check_failed", e.getMessage()).getString());
             return false;
         }
     }
@@ -80,119 +81,130 @@ public class WebmapviewClient implements ClientModInitializer {
     public void onInitializeClient() {
         instance = this;
 
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            dispatcher.register(
-                    ClientCommandManager.literal("urladd")
-                            .then(ClientCommandManager.argument("url", StringArgumentType.string())
-                                    .executes(context -> {
-                                        String url = StringArgumentType.getString(context, "url");
-                                        UrlManager.addUrl(url);
-                                        return 1;
-                                    })
-                            )
-            );
-
-            dispatcher.register(
-                    ClientCommandManager.literal("urlremove")
-                            .then(ClientCommandManager.argument("url", StringArgumentType.string()).suggests(WebmapviewClient::suggestUrls)
-                                    .executes(context -> {
-                                        String url = StringArgumentType.getString(context, "url");
-                                        UrlManager.removeUrl(url);
-                                        return 1;
-                                    })
-                            )
-            );
-
-            dispatcher.register(
-                    ClientCommandManager.literal("urllist")
-                            .executes(context -> {
-                                List<String> urls = UrlManager.getUrlList();
-                                StringBuilder listMessage = new StringBuilder("Available URLs:\n");
-                                for (int i = 0; i < urls.size(); i++) {
-                                    listMessage.append(i + 1).append(": ").append(urls.get(i)).append("\n");
-                                }
-                                context.getSource().sendFeedback(Text.of(listMessage.toString()));
-                                return 1;
-                            })
-            );
-            dispatcher.register(
-                    ClientCommandManager.literal("urlset")
-                            .then(ClientCommandManager.argument("url", StringArgumentType.string()).suggests(WebmapviewClient::suggestUrls)
-                                    .executes(context -> {
-                                        String url = StringArgumentType.getString(context, "url");
-                                        UrlManager.setDefaultUrl(url);
-                                        return 1;
-                                    })
-                            )
-            );
-            dispatcher.register(
-                    ClientCommandManager.literal("webmapviewoption")
-                            .then(ClientCommandManager.argument("url", StringArgumentType.string())
-                                    .executes(context -> {
-                                        UrlManager.webmapview = !UrlManager.webmapview;
-                                        if (UrlManager.webmapview) {
-                                            sendFeedback("webmapview is enabled");
-                                        } else {
-                                            sendFeedback("webmapview is not enabled");
-                                        }
-                                        return 1; })
-                            )
-            );
-            dispatcher.register(
-                    ClientCommandManager.literal("webmapview")
-                            .then(ClientCommandManager.literal("help")
-                                    .executes(context -> {
-                                        String helpMessage = "/urladd: " + Text.translatable("command.urladd.description").getString() + "\n" +
-                                                "/urlremove: " + Text.translatable("command.urlremove.description").getString() + "\n" +
-                                                "/urllist: " + Text.translatable("command.urllist.description").getString() + "\n" +
-                                                "/urlset: " + Text.translatable("command.urlset.description").getString() + "\n" +
-                                                "/webmapviewoption: " + Text.translatable("command.webmapviewoption.description").getString() + "\n";
-                                        sendFeedback(helpMessage);
-                                        return 1;
-                                    })
-                            )
-            );
-        });
-
-        keyBinding = new KeyBinding(
-                "key.webmapview.open_basic_browser",
-                GLFW.GLFW_KEY_H,
-                "category.webmapview"
+        // Konfiguration frueh laden: legt beim ersten Start config/webmapview.json an,
+        // damit die Datei direkt im configs-Ordner steht und editierbar ist.
+        UrlManager.applyConfig();
+        System.out.println("[webmapview] Konfiguration: " + WebmapViewConfig.configPath());
+        System.out.println("[webmapview] Beim ersten Start laedt MCEF Modern einmalig die "
+                + "Chromium-Engine (~34 MB) nach config/mcef-modern/ (entpackt ~357 MB).");
+        // Kein Einstellen der Map-URL per Command mehr: die Konfiguration liegt in
+        // config/webmapview.json und wird ueber ModMenu bzw. diesen Screen bearbeitet.
+        // /webmapview ist nur ein Shortcut, der den Config-Screen oeffnet.
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+                dispatcher.register(
+                        ClientCommands.literal("webmapview")
+                                .executes(context -> {
+                                    Minecraft minecraft = Minecraft.getInstance();
+                                    minecraft.execute(() -> minecraft.gui.setScreen(
+                                            new WebMapViewConfigScreen(minecraft.gui.screen())));
+                                    return 1;
+                                })
+                )
         );
 
-        KeyBindingHelper.registerKeyBinding(keyBinding);
+        keyMapping = new KeyMapping(
+                "key.webmapview.open_basic_browser",
+                InputConstants.KEY_H,
+                CATEGORY
+        );
 
-        final MinecraftClient minecraft = MinecraftClient.getInstance();
+        KeyMappingHelper.registerKeyMapping(keyMapping);
+
+        // Chromium-Engine (MCEF Modern) schon beim Spielstart im Hintergrund laden,
+        // damit der einmalige Download (~34 MB) nicht erst beim Oeffnen des Browsers
+        // passiert. Laeuft auf dem ForkJoinPool - der Render-Thread blockiert nicht.
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (keyBinding.wasPressed()) {
-                System.out.println("[DEBUG] KeyBinding detected! Current screen: " + (minecraft.currentScreen == null ? "null" : minecraft.currentScreen.getClass().getSimpleName()));
+            if (!enginePreloadStarted) {
+                enginePreloadStarted = true;
+                startEnginePreload();
+            }
+            logEngineProgress();
+        });
 
-                if(minecraft.currentScreen instanceof BasicBrowser) {
-                    System.out.println("[DEBUG] Closing BasicBrowser");
-                    minecraft.setScreen(null);
+        final Minecraft minecraft = Minecraft.getInstance();
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (keyMapping.consumeClick()) {
+                if (minecraft.gui.screen() instanceof BasicBrowser) {
+                    minecraft.gui.setScreen(null);
                 }
                 else {
-                    System.out.println("[DEBUG] Opening BasicBrowser");
                     if (!isResourcePackFullyLoaded()) {
                         if (minecraft.player != null) {
-                            minecraft.player.sendMessage(Text.translatable("browser.resource_pack.not_loaded"), false);
+                            minecraft.player.sendSystemMessage(Component.translatable("browser.resource_pack.not_loaded"));
                         }
-                        System.out.println(Text.translatable("debug.key_handler.resource_not_ready").getString());
+                        System.out.println(Component.translatable("debug.key_handler.resource_not_ready").getString());
                         return;
                     }
 
                     try {
-                        System.out.println(Text.translatable("browser.resource_pack.ready").getString());
-                        minecraft.setScreen(new BasicBrowser(Text.translatable("browser.title")));
-
+                        minecraft.gui.setScreen(new BasicBrowser(Component.translatable("browser.title")));
                     } catch (Exception e) {
-                        System.err.println(Text.translatable("debug.key_handler.creation_failed", e.getMessage()).getString());
+                        System.err.println(Component.translatable("debug.key_handler.creation_failed", e.getMessage()).getString());
                         if (minecraft.player != null) {
-                            minecraft.player.sendMessage(Text.translatable("browser.creation.failed"), false);
+                            minecraft.player.sendSystemMessage(Component.translatable("browser.creation.failed"));
                         }
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Startet die MCEF-Modern-Initialisierung direkt beim Spielstart, damit der
+     * einmalige Chromium-Download nicht erst beim Oeffnen des Browsers anfaellt.
+     * MCEFApi.initialize() ist idempotent: der Browser bekommt spaeter dieselbe
+     * Initialization und wartet nur noch auf das fertige Future.
+     */
+    private static void startEnginePreload() {
+        if (!WebmapViewConfig.get().preloadEngine) {
+            System.out.println("[webmapview] Engine-Vorladen deaktiviert "
+                    + "(preloadEngine=false in " + WebmapViewConfig.configPath() + ").");
+            return;
+        }
+
+        try {
+            engineInitialization = MCEFApi.initialize();
+        } catch (Throwable t) {
+            System.err.println("[webmapview] Engine konnte nicht vorgeladen werden: " + t.getMessage());
+            return;
+        }
+
+        System.out.println("[webmapview] Lade Chromium-Engine im Hintergrund vor "
+                + "(erster Start: ~34 MB Download, danach ~357 MB entpackt) ...");
+
+        engineInitialization.getFuture().whenComplete((api, error) -> {
+            if (error != null) {
+                System.err.println("[webmapview] Engine-Vorladen fehlgeschlagen: " + error.getMessage());
+            } else {
+                System.out.println("[webmapview] Chromium-Engine bereit - der Browser oeffnet jetzt sofort.");
+            }
+        });
+    }
+
+    /** Loggt den Fortschritt des Vorladens (Stufenwechsel oder +10 %), hoechstens alle 2 s. */
+    private static void logEngineProgress() {
+        MCEFApi.Initialization initialization = engineInitialization;
+        if (initialization == null || initialization.isDone()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - lastEngineLogTime < 2000) {
+            return;
+        }
+
+        MCEFApi.Initialization.Stage stage = initialization.getStage();
+        int percent = Math.round(initialization.getPercentage());
+        boolean stageChanged = stage != lastLoggedStage;
+        boolean percentJumped = percent - lastLoggedPercent >= 10;
+
+        if (!stageChanged && !percentJumped) {
+            return;
+        }
+
+        lastEngineLogTime = now;
+        lastLoggedStage = stage;
+        lastLoggedPercent = percent;
+        System.out.println("[webmapview] Chromium-Engine: " + stage + " " + percent + " %");
     }
 }

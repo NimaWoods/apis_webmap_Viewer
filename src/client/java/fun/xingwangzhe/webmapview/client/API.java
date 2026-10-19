@@ -10,26 +10,23 @@ import java.util.ArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.Minecraft;
 
 public class API {
 
     private static HttpServer server;
     private static List<PlayerInformation> localPlayers;
     private static ScheduledExecutorService scheduler;
-
     public static void startLocalHttpServer(int port, List<PlayerInformation> players) {
+        // init() des Screens laeuft bei jedem Oeffnen erneut -> Server nur einmal binden,
+        // sonst BindException ("Adresse wird bereits verwendet") und Leak des alten Servers
+        if (server != null) {
+            updateLocalPlayers(players);
+            return;
+        }
         try {
-            // 如果没有提供玩家列表，则创建一个新的列表
-            if (players == null) {
-                localPlayers = new ArrayList<>();
-            } else {
-                localPlayers = new ArrayList<>(players);
-            }
-            
-            // 检查是否需要添加当前玩家信息
-            addCurrentPlayerInfo();
-            
+            // Liste initialisieren (null = neue leere Liste) und aktuellen Spieler ergaenzen
+            updateLocalPlayers(players);
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/local-players.json", new HttpHandler() {
                 @Override
@@ -60,6 +57,7 @@ public class API {
     public static void stopLocalHttpServer() {
         if (server != null) {
             server.stop(0);
+            server = null; // sonst blockiert der Guard in startLocalHttpServer einen Neustart
             System.out.println("Local HTTP server stopped.");
         }
         
@@ -76,6 +74,7 @@ public class API {
             }
             System.out.println("Player info updater stopped.");
         }
+        scheduler = null;
     }
 
     public static void updateLocalPlayers(List<PlayerInformation> players) {
@@ -92,8 +91,8 @@ public class API {
      */
     private static void addCurrentPlayerInfo() {
         try {
-            MinecraftClient client = MinecraftClient.getInstance();
-            if (client.player != null && client.world != null) {
+            Minecraft client = Minecraft.getInstance();
+            if (client.player != null && client.level != null) {
                 String currentPlayerName = client.player.getName().getString();
                 
                 // 检查当前玩家是否已经在列表中
@@ -103,15 +102,15 @@ public class API {
                 // 如果当前玩家不在列表中，则添加
                 if (!playerExists) {
                     PlayerInformation currentPlayer = new PlayerInformation(
-                        client.player.getUuid().toString(),
+                        client.player.getUUID().toString(),
                         currentPlayerName,
                         "[fp]"+client.player.getDisplayName().getString(),
                         client.player.getX(),
                         client.player.getZ(),
-                        client.world.getRegistryKey().getValue().toString().replace(":", "_"),
-                        client.player.getYaw(),
+                        client.level.dimension().identifier().toString().replace(":", "_"),
+                        client.player.getYRot(),
                         (int) client.player.getHealth(),
-                        (int) client.player.getArmor(),
+                        client.player.getArmorValue(),
                         "", // headUrl
                         false, // isVirtual
                         "" // icon
@@ -145,8 +144,8 @@ public class API {
      */
     private static void updateCurrentPlayerInfo() {
         try {
-            MinecraftClient client = MinecraftClient.getInstance();
-            if (client.player != null && client.world != null) {
+            Minecraft client = Minecraft.getInstance();
+            if (client.player != null && client.level != null) {
                 String currentPlayerName = client.player.getName().getString();
                 
                 // 查找并更新当前玩家信息
@@ -154,10 +153,10 @@ public class API {
                     if (player.getName().equals(currentPlayerName) && !player.isVirtual()) {
                         player.setX(client.player.getX());
                         player.setZ(client.player.getZ());
-                        player.setYaw(client.player.getYaw());
+                        player.setYaw(client.player.getYRot());
                         player.setHealth((int) client.player.getHealth());
-                        player.setArmor((int) client.player.getArmor());
-                        player.setWorld(client.world.getRegistryKey().getValue().toString().replace(":", "_"));
+                        player.setArmor(client.player.getArmorValue());
+                        player.setWorld(client.level.dimension().identifier().toString().replace(":", "_"));
                         break;
                     }
                 }

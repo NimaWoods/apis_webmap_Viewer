@@ -1,4 +1,3 @@
-[中文文档](README_CN.md)
 # WebmapView Mod
 
 This is a Fabric mod for Minecraft that allows players to view web map services (squaremap) through an in-game browser interface, supporting features like custom URLs.
@@ -61,5 +60,3 @@ are migrated automatically on first start.
 
 MIT – see [LICENSE](LICENSE). Runtime dependency [MCEF Modern](https://modrinth.com/project/mcef-modern) is LGPL-2.1 and is not bundled.
 Based on the [mcef-fabric-example-mod](https://github.com/CinemaMod/mcef-fabric-example-mod) by CinemaMod (CC0-1.0).
-
-👍->🌟
